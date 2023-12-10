@@ -24,18 +24,24 @@ var rpcPass string = "123321"
 
 const bitcoinCli = "bitcoin-cli"
 
-// const blockcypherTransactionApi = "https://api.blockcypher.com/v1/btc/txs/"
-const blockcypherTransactionApi = "https://api.blockcypher.com/v1/btc/test3/txs/"
+const blockcypherMainnetTransactionApi = "https://api.blockcypher.com/v1/btc/txs/"
+const blockcypherTestnetTransactionApi = "https://api.blockcypher.com/v1/btc/test3/txs/"
+var blockcypherTransactionApi = blockcypherMainnetTransactionApi
 
 var clientObj client
 var rootCmd = &cobra.Command{Use: "dspend"}
 
-const defaultFeeInSatoshi = 40000
+const defaultFeeInSatoshi = 400
 
 var createCmd = &cobra.Command{
 	Use:   "create-tx",
 	Short: "Create a new transaction",
 	Run: func(cmd *cobra.Command, args []string) {
+		testnet, _ := cmd.Flags().GetBool("testnet")
+		if testnet {
+			blockcypherTransactionApi = blockcypherTestnetTransactionApi
+		}
+		
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -51,6 +57,11 @@ var viewCmd = &cobra.Command{
 	Use:   "view-tx",
 	Short: "View transaction",
 	Run: func(cmd *cobra.Command, args []string) {
+		testnet, _ := cmd.Flags().GetBool("testnet")
+		if testnet {
+			blockcypherTransactionApi = blockcypherTestnetTransactionApi
+		}
+		
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -71,6 +82,11 @@ var modifyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		rawTx, _ := cmd.Flags().GetString("raw-tx")
 		sourceAddress, _ := cmd.Flags().GetString("source-address")
+		
+		testnet, _ := cmd.Flags().GetBool("testnet")
+		if testnet {
+			blockcypherTransactionApi = blockcypherTestnetTransactionApi
+		}
 
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
@@ -83,6 +99,11 @@ var sendCmd = &cobra.Command{
 	Use:   "send-tx",
 	Short: "Send a signed transaction",
 	Run: func(cmd *cobra.Command, args []string) {
+		testnet, _ := cmd.Flags().GetBool("testnet")
+		if testnet {
+			blockcypherTransactionApi = blockcypherTestnetTransactionApi
+		}
+		
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -103,18 +124,22 @@ func init() {
 	rpcPass = os.Getenv("RPC_PASS")
 
 	createCmd.Flags().Bool("debug", false, "Run in debug mode")
+	createCmd.Flags().Bool("testnet", false, "Run on testnet")
 	createCmd.Flags().String("source-address", "", "Source Bitcoin address")
 	createCmd.Flags().String("destination-address", "", "Destination Bitcoin address")
 	createCmd.Flags().String("fee", "", "Fee in satoshi")
 
 	viewCmd.Flags().Bool("debug", false, "Run in debug mode")
+	viewCmd.Flags().Bool("testnet", false, "Run on testnet")
 	viewCmd.Flags().StringP("raw-tx", "e", "", "Existing raw transaction in hexadecimal format")
 
 	modifyCmd.Flags().Bool("debug", false, "Run in debug mode")
+	modifyCmd.Flags().Bool("testnet", false, "Run on testnet")
 	modifyCmd.Flags().StringP("raw-tx", "e", "", "Existing raw transaction in hexadecimal format")
 	modifyCmd.Flags().String("source-address", "", "Source Bitcoin address")
 
 	sendCmd.Flags().Bool("debug", false, "Run in debug mode")
+	sendCmd.Flags().Bool("testnet", false, "Run on testnet")
 	sendCmd.Flags().StringP("raw-tx", "s", "", "Raw transaction in hexadecimal format")
 
 	rootCmd.AddCommand(createCmd, viewCmd, modifyCmd, sendCmd)
@@ -284,9 +309,9 @@ func (c *client) CreateRawTransaction(source, destination string, fee int) (unsi
 	fmt.Printf("destination address: \t %s\n", destination)
 	fmt.Printf("source address:\t\t %s\n", source)
 	fmt.Printf("input transaction hash:\t %s\n", txid)
-	fmt.Printf("input amount:\t\t %f\n", amount)
-	fmt.Printf("fee:\t\t\t %f\n", satoshiToBitcoin(fee))
-	fmt.Printf("output amount: \t\t %f\n", amountInBTC)
+	fmt.Printf("input amount:\t\t %.8f\n", amount)
+	fmt.Printf("fee:\t\t\t %.8f\n", satoshiToBitcoin(fee))
+	fmt.Printf("output amount: \t\t %.8f\n", amountInBTC)
 
 	mapList = append(mapList, map[string]interface{}{
 		destination: amountInBTC,
@@ -357,9 +382,9 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 	fmt.Printf("destination address: \t %s\n", decodedTx.Vout[0].ScriptPubKey.Address)
 	fmt.Printf("source address:\t\t %s\n", source)
 	fmt.Printf("input transaction hash:\t %s\n", txid)
-	fmt.Printf("input amount:\t\t %f\n", inputAmount)
-	fmt.Printf("fee:\t\t\t %f\n", previousFee)
-	fmt.Printf("output amount: \t\t %f\n", inputAmount-previousFee)
+	fmt.Printf("input amount:\t\t %.8f\n", inputAmount)
+	fmt.Printf("fee:\t\t\t %.8f\n", previousFee)
+	fmt.Printf("output amount: \t\t %.8f\n", inputAmount-previousFee)
 
 	var modifyFee, modifyDestAddr string
 
@@ -426,6 +451,7 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 
 func (c *client) SignAndSendTx(rawTx string) (string, error) {
 	args := []string{"signrawtransactionwithwallet", rawTx}
+	fmt.Println("signing transaction...")
 	if c.debugMode {
 		fmt.Printf("command: signrawtransactionwithwallet %s \n", rawTx)
 	}
@@ -458,6 +484,7 @@ func (c *client) SignAndSendTx(rawTx string) (string, error) {
 func (c *client) SendRawTransaction(signedHex string) (transactionID string, err error) {
 	var params []interface{}
 	params = append(params, signedHex)
+	fmt.Println("broadcasting transaction to the network...")
 	if c.debugMode {
 		fmt.Printf("command: sendrawtransaction %s \n", signedHex)
 	}
