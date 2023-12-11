@@ -263,8 +263,8 @@ func (c *client) CreateRawTransaction(source, destination string, fee int) (unsi
 		return "", err
 	}
 
-	if len(unspentTx) == 0 {
-		return "", fmt.Errorf("%s has 0 unspent tx", source)
+	if len(unspentTx) != 1 {
+		return "", fmt.Errorf("expected 1 unspent tx in %s, got %d", source, len(unspentTx))
 	}
 
 	var txid string = unspentTx[0].Txid
@@ -292,7 +292,7 @@ func (c *client) CreateRawTransaction(source, destination string, fee int) (unsi
 	if len(destination) == 0 {
 		fmt.Println("creating a new output address")
 		if c.debugMode {
-			fmt.Println("command: bitcoin-cli getnewaddress")
+			fmt.Println("- command: bitcoin-cli getnewaddress")
 		}
 
 		cmd := exec.Command(bitcoinCli, "getnewaddress")
@@ -321,7 +321,7 @@ func (c *client) CreateRawTransaction(source, destination string, fee int) (unsi
 	}
 
 	if c.debugMode {
-		fmt.Printf("command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
+		fmt.Printf("- command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
 	}
 
 	err = c.Call("createrawtransaction", params, 3)
@@ -405,7 +405,7 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 	if modifyDestAddr == "y" {
 		fmt.Println("creating a new output address")
 		if c.debugMode {
-			fmt.Println("command: bitcoin-cli getnewaddress")
+			fmt.Println("- command: bitcoin-cli getnewaddress")
 		}
 
 		cmd := exec.Command(bitcoinCli, "getnewaddress")
@@ -433,7 +433,7 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 	}
 
 	if c.debugMode {
-		fmt.Printf("command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
+		fmt.Printf("- command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
 	}
 
 	err = c.Call("createrawtransaction", params, 3)
@@ -453,7 +453,7 @@ func (c *client) SignAndSendTx(rawTx string) (string, error) {
 	args := []string{"signrawtransactionwithwallet", rawTx}
 	fmt.Println("signing transaction...")
 	if c.debugMode {
-		fmt.Printf("command: signrawtransactionwithwallet %s \n", rawTx)
+		fmt.Printf("- command: signrawtransactionwithwallet %s \n", rawTx)
 	}
 	cmd := exec.Command(bitcoinCli, args...)
 
@@ -486,7 +486,7 @@ func (c *client) SendRawTransaction(signedHex string) (transactionID string, err
 	params = append(params, signedHex)
 	fmt.Println("broadcasting transaction to the network...")
 	if c.debugMode {
-		fmt.Printf("command: sendrawtransaction %s \n", signedHex)
+		fmt.Printf("- command: sendrawtransaction %s \n", signedHex)
 	}
 	err = c.Call("sendrawtransaction", params, 5)
 	if err != nil {
