@@ -26,6 +26,7 @@ const bitcoinCli = "bitcoin-cli"
 
 const blockcypherMainnetTransactionApi = "https://api.blockcypher.com/v1/btc/txs/"
 const blockcypherTestnetTransactionApi = "https://api.blockcypher.com/v1/btc/test3/txs/"
+
 var blockcypherTransactionApi = blockcypherMainnetTransactionApi
 
 var clientObj client
@@ -41,7 +42,7 @@ var createCmd = &cobra.Command{
 		if testnet {
 			blockcypherTransactionApi = blockcypherTestnetTransactionApi
 		}
-		
+
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -61,7 +62,7 @@ var viewCmd = &cobra.Command{
 		if testnet {
 			blockcypherTransactionApi = blockcypherTestnetTransactionApi
 		}
-		
+
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -70,7 +71,14 @@ var viewCmd = &cobra.Command{
 			fmt.Println("--raw-tx is required")
 			os.Exit(1)
 		}
-		txDetail, err := clientObj.DecodeRawTransaction(rawTx)
+
+		source, _ := cmd.Flags().GetString("source-address")
+		if len(rawTx) == 0 {
+			fmt.Println("--source-address is required")
+			os.Exit(1)
+		}
+
+		txDetail, err := clientObj.DecodeRawTransaction(rawTx, source)
 		failCleanly(err)
 		printJson(txDetail)
 	},
@@ -82,7 +90,7 @@ var modifyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		rawTx, _ := cmd.Flags().GetString("raw-tx")
 		sourceAddress, _ := cmd.Flags().GetString("source-address")
-		
+
 		testnet, _ := cmd.Flags().GetBool("testnet")
 		if testnet {
 			blockcypherTransactionApi = blockcypherTestnetTransactionApi
@@ -103,7 +111,7 @@ var sendCmd = &cobra.Command{
 		if testnet {
 			blockcypherTransactionApi = blockcypherTestnetTransactionApi
 		}
-		
+
 		debug, _ := cmd.Flags().GetBool("debug")
 		clientObj.debugMode = debug
 
@@ -132,6 +140,7 @@ func init() {
 	viewCmd.Flags().Bool("debug", false, "Run in debug mode")
 	viewCmd.Flags().Bool("testnet", false, "Run on testnet")
 	viewCmd.Flags().StringP("raw-tx", "e", "", "Existing raw transaction in hexadecimal format")
+	viewCmd.Flags().StringP("source-address", "a", "", "Source address is required")
 
 	modifyCmd.Flags().Bool("debug", false, "Run in debug mode")
 	modifyCmd.Flags().Bool("testnet", false, "Run on testnet")
@@ -198,9 +207,6 @@ type client struct {
 	debugMode bool
 
 	url     string
-	req     *clientRequest
-	res     *clientResponse
-	reqJson *strings.Reader
 }
 
 type unspentTx struct {
@@ -212,14 +218,15 @@ type unspentTx struct {
 }
 
 type decodedTx struct {
-	Txid     string `json:"txid"`
-	Hash     string `json:"hash"`
-	TotalIn  int    `json:"totalid"`
-	TotalOut int    `json:"totalOut"`
+	Txid     string  `json:"txid"`
+	Hash     string  `json:"hash"`
+	TotalIn  int     `json:"totalid"`
+	TotalOut float64 `json:"totalOut"`
 
 	Vin []struct {
-		Txid string `json:"txid"`
-		Vout int    `json:"vout"`
+		Txid  string  `json:"txid"`
+		Vout  int     `json:"vout"`
+		Value float64 `json:"value"`
 	} `json:"vin"`
 
 	Vout []struct {
@@ -254,7 +261,7 @@ type signTransactionResponse struct {
 	} `json:"errors"`
 }
 
-func (c *client) CreateRawTransaction(source, destination string, fee int) (unsignedTransactionHash string, err error) {
+func (c *client) CreateRawTransaction0(source, destination string, fee int) (unsignedTransactionHash string, err error) {
 	if len(source) == 0 {
 		return "", fmt.Errorf("source address is required")
 	}
@@ -324,42 +331,133 @@ func (c *client) CreateRawTransaction(source, destination string, fee int) (unsi
 		fmt.Printf("- command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
 	}
 
-	err = c.Call("createrawtransaction", params, 3)
+	res, err := c.Call("createrawtransaction", params, 3)
 	failCleanly(err)
-	if c.res.Error != nil {
-		err = errors.New(fmt.Sprintf("SIGNRAWTRANSACTIONERROR %v", c.res.Error))
+	if res.Error != nil {
+		err = errors.New(fmt.Sprintf("SIGNRAWTRANSACTIONERROR %v", res.Error))
 		return
 	}
 	if err != nil {
 		return "", err
 	}
 
-	return c.res.Result.(string), nil
+	return res.Result.(string), nil
 }
 
-func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTransactionHash string, err error) {
-	decodedTx, err := clientObj.DecodeRawTransaction(existingRawTxHex)
+func (c *client) CreateRawTransaction(source string, destination string, fee int) (unsignedTransactionHash string, err error) {
+	if len(source) == 0 {
+		return "", fmt.Errorf("source address is required")
+	}
+
+	unspentTxs, err := c.ListUnspent([]string{source})
 	if err != nil {
 		return "", err
 	}
 
-	var params []interface{}
-	var mapList []map[string]interface{}
+	if len(unspentTxs) == 0 {
+		return "", fmt.Errorf("no unspent transactions for source address %s", source)
+	}
 
-	txid := decodedTx.Vin[0].Txid
-	vout := decodedTx.Vin[0].Vout
+	fmt.Printf("using %d unspent tx found in %s\n", len(unspentTxs), source)
 
-	mapList = append(mapList, map[string]interface{}{
-		"txid": txid,
-		"vout": vout,
-	})
+	var inputs []map[string]interface{}
+	var totalAmount float64
+
+	for _, unspentTx := range unspentTxs {
+		txid := unspentTx.Txid
+		vout := 1 // You may need to adjust this based on your actual transaction structure
+
+		inputs = append(inputs, map[string]interface{}{
+			"txid": txid,
+			"vout": vout,
+		})
+
+		fmt.Printf("%s:\t%.8f\n", txid, unspentTx.Amount)
+
+		totalAmount += unspentTx.Amount
+	}
+
+	if fee == 0 {
+		fee = defaultFeeInSatoshi
+	}
+
+	// Calculate the total amount less the fee
+	amountLessFee := bitcoinToSatoshi(totalAmount) - fee
+	if amountLessFee <= 0 {
+		return "", fmt.Errorf("invalid amount: %d - %d", bitcoinToSatoshi(totalAmount), amountLessFee)
+	}
+
+	amountInBTC := satoshiToBitcoin(amountLessFee)
+
+	if len(destination) == 0 {
+		fmt.Println("creating a new output address")
+		if c.debugMode {
+			fmt.Println("- command: bitcoin-cli getnewaddress")
+		}
+
+		cmd := exec.Command(bitcoinCli, "getnewaddress")
+
+		output, err := cmd.Output()
+		if err != nil {
+			return "", err
+		}
+		destination = strings.Trim(string(output), "\n")
+		fmt.Printf("new output address: %s\n", destination)
+	}
+
+	fmt.Println("***transaction details***")
+	fmt.Printf("destination address: \t %s\n", destination)
+	fmt.Printf("source address:\t\t %s\n", source)
+	fmt.Printf("total input amount:\t %.8f\n", totalAmount)
+	fmt.Printf("fee:\t\t\t %.8f\n", satoshiToBitcoin(fee))
+	fmt.Printf("output amount: \t\t %.8f\n", amountInBTC)
+
+	// Pass 'inputs' when calling createrawtransaction
+	params := []interface{}{inputs, map[string]interface{}{destination: amountInBTC}}
+
+	inputsJSON, err := json.Marshal(inputs)
+	if err != nil {
+		return "", err
+	}
+
+	if c.debugMode {
+		fmt.Printf("- command: bitcoin-cli createrawtransaction \"%s\" \"[{\"%v\":\"%v\"}]\"\n", inputsJSON, destination, amountInBTC)
+	}
+
+	res, err := c.Call("createrawtransaction", params, 3)
+	failCleanly(err)
+	if res.Error != nil {
+		err = errors.New(fmt.Sprintf("CREATERAWTRANSACTIONERROR %v", res.Error))
+		return
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return res.Result.(string), nil
+}
+
+func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTransactionHash string, err error) {
+	decodedTx, err := clientObj.DecodeRawTransaction(existingRawTxHex, source)
+	if err != nil {
+		return "", err
+	}
+
+	var inputs []map[string]interface{}
+
+	for _, vin := range decodedTx.Vin {
+		inputs = append(inputs, map[string]interface{}{
+			"txid": vin.Txid,
+			"vout": vin.Vout,
+		})
+	}
 
 	txData, err := c.GetDataByTransaction(decodedTx.Vin[0].Txid)
 	if err != nil {
 		return "", err
 	}
 
-	var inputAmount, previousFee, previousOutput float64
+	var inputAmount, previousOutput float64
 	previousOutput = decodedTx.Vout[0].Value
 
 	for _, input := range txData.Outputs {
@@ -374,17 +472,9 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 		return "", fmt.Errorf("invalid input or amount")
 	}
 
-	previousFee = inputAmount - previousOutput
-
 	destination := decodedTx.Vout[0].ScriptPubKey.Address
 
-	fmt.Println("transaction details")
-	fmt.Printf("destination address: \t %s\n", decodedTx.Vout[0].ScriptPubKey.Address)
-	fmt.Printf("source address:\t\t %s\n", source)
-	fmt.Printf("input transaction hash:\t %s\n", txid)
-	fmt.Printf("input amount:\t\t %.8f\n", inputAmount)
-	fmt.Printf("fee:\t\t\t %.8f\n", previousFee)
-	fmt.Printf("output amount: \t\t %.8f\n", inputAmount-previousFee)
+	c.displayTransaction(decodedTx, source)
 
 	var modifyFee, modifyDestAddr string
 
@@ -425,28 +515,28 @@ func (c *client) ModifyTransaction(existingRawTxHex, source string) (unsignedTra
 		return "", fmt.Errorf("invalid amount/fee")
 	}
 
-	mapList = append(mapList, map[string]interface{}{
-		destination: amountInBTC,
-	})
-	for _, v := range mapList {
-		params = append(params, []interface{}{v})
+	inputsJSON, err := json.Marshal(inputs)
+	if err != nil {
+		return "", err
 	}
+
+	params := []interface{}{inputs, map[string]interface{}{destination: amountInBTC}}
 
 	if c.debugMode {
-		fmt.Printf("- command: bitcoin-cli createrawtransaction \"[{\"txid\":\"%v\",\"vout\":%v}]\" \"[{\"%v\":\"%v\"}]\" \n", txid, vout, destination, amountInBTC)
+		fmt.Printf("- command: bitcoin-cli createrawtransaction \"%s\" \"[{\"%v\":\"%v\"}]\"\n", inputsJSON, destination, amountInBTC)
 	}
 
-	err = c.Call("createrawtransaction", params, 3)
+	res, err := c.Call("createrawtransaction", params, 3)
 	failCleanly(err)
-	if c.res.Error != nil {
-		err = errors.New(fmt.Sprintf("SIGNRAWTRANSACTIONERROR %v", c.res.Error))
+	if res.Error != nil {
+		err = errors.New(fmt.Sprintf("SIGNRAWTRANSACTIONERROR %v", res.Error))
 		return
 	}
 	if err != nil {
 		return "", err
 	}
 
-	return c.res.Result.(string), nil
+	return res.Result.(string), nil
 }
 
 func (c *client) SignAndSendTx(rawTx string) (string, error) {
@@ -478,7 +568,8 @@ func (c *client) SignAndSendTx(rawTx string) (string, error) {
 	signedTx.Hex = strings.Trim(signedTx.Hex, "\n")
 
 	fmt.Printf("Signed tx: %s\n", signedTx.Hex)
-	return c.SendRawTransaction(signedTx.Hex)
+	// return c.SendRawTransaction(signedTx.Hex)
+	return "", nil
 }
 
 func (c *client) SendRawTransaction(signedHex string) (transactionID string, err error) {
@@ -488,14 +579,14 @@ func (c *client) SendRawTransaction(signedHex string) (transactionID string, err
 	if c.debugMode {
 		fmt.Printf("- command: sendrawtransaction %s \n", signedHex)
 	}
-	err = c.Call("sendrawtransaction", params, 5)
+	res, err := c.Call("sendrawtransaction", params, 5)
 	if err != nil {
 		return
-	} else if c.res.Error != nil {
-		err = errors.New(fmt.Sprintf("SENDRAWTRANSACTIONERROR %v", c.res.Error))
+	} else if res.Error != nil {
+		err = errors.New(fmt.Sprintf("SENDRAWTRANSACTIONERROR %v", res.Error))
 		return
 	}
-	transactionID = c.res.Result.(string)
+	transactionID = res.Result.(string)
 	return
 }
 
@@ -522,7 +613,7 @@ func (c client) ListUnspent(address []string) ([]unspentTx, error) {
 }
 
 func (c *client) GetDataByTransaction(txid string) (body blockcypherTx, err error) {
-	requestUrl := blockcypherTransactionApi + txid
+	requestUrl := blockcypherTransactionApi + txid + "?token=" + os.Getenv("BLOCKCYPHER_API_KEY")
 	res, err := http.Get(requestUrl)
 	failCleanly(err)
 
@@ -539,7 +630,7 @@ func (c *client) GetDataByTransaction(txid string) (body blockcypherTx, err erro
 	return
 }
 
-func (c *client) DecodeRawTransaction(txHex string) (*decodedTx, error) {
+func (c *client) DecodeRawTransaction(txHex, source string) (*decodedTx, error) {
 	args := []string{"decoderawtransaction", txHex}
 	cmd := exec.Command(bitcoinCli, args...)
 
@@ -554,57 +645,87 @@ func (c *client) DecodeRawTransaction(txHex string) (*decodedTx, error) {
 		return nil, err
 	}
 
+	for i, vin := range tx.Vin {
+		txData, err := c.GetDataByTransaction(vin.Txid)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, input := range txData.Outputs {
+			if input.Addresses[0] != source {
+				continue
+			}
+
+			tx.Vin[i].Value = satoshiToBitcoin(input.Value)
+			tx.TotalIn += input.Value
+		}
+	}
+
+	for _, vout := range tx.Vout {
+		tx.TotalOut += (vout.Value)
+	}
+
 	return &tx, nil
 }
 
-func (c *client) WriteRequest(method string, params interface{}, id uint64) error {
-	c.req = &clientRequest{
+func (c *client) Call(method string, params []interface{}, id uint64) (*clientResponse, error) {
+	
+	req := &clientRequest{
 		Id:     id,
 		Method: method,
 		Params: params,
 	}
-	jsonData, err := json.Marshal(c.req)
+	jsonData, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.reqJson = strings.NewReader(string(jsonData))
-	return nil
-}
+	reqJson := strings.NewReader(string(jsonData))
 
-func (c *client) ReadResponseBody(res *http.Response) error {
-	body, err := ioutil.ReadAll(res.Body)
+	res, err := http.Post(c.url, "application/json", reqJson)
 	if err != nil {
-		return err
-	}
-	if res.Body == nil {
-		return errors.New("EMPTY RESPONSE ERROR: there was no response from the server")
-	}
-	defer res.Body.Close()
-	//result := make(map[string]interface{})
-	err = json.Unmarshal(body, &c.res)
-	//c.res = result
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *client) Call(method string, params []interface{}, id uint64) error {
-	err := c.WriteRequest(method, params, id)
-	if err != nil {
-		return err
-	}
-	res, err := http.Post(c.url, "application/json", c.reqJson)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	if res.StatusCode > 299 {
-		return fmt.Errorf("%v", res.Status)
+		return nil, fmt.Errorf("%v", res.Status)
 	}
-	err = c.ReadResponseBody(res)
+	
+	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if res.Body == nil {
+		return nil, errors.New("EMPTY RESPONSE ERROR: there was no response from the server")
+	}
+	defer res.Body.Close()
+	var clientRes clientResponse
+	//result := make(map[string]interface{})
+	err = json.Unmarshal(body, &clientRes)
+	//c.res = result
+	if err != nil {
+		return nil, err
+	}
+
+	return &clientRes, nil
+}
+
+func (c *client) displayTransaction(decodedTx *decodedTx, source string) error {
+	fee := satoshiToBitcoin(decodedTx.TotalIn) - decodedTx.TotalOut
+
+	fmt.Println("transaction details")
+	fmt.Printf("source address: %s\n", source)
+
+	fmt.Println("inputs")
+	for _, vin := range decodedTx.Vin {
+		fmt.Printf("%s:\t%.8f\n", vin.Txid, vin.Value)
+	}
+	fmt.Printf("total input:\t\t\t\t\t\t\t\t%.8f\n", satoshiToBitcoin(decodedTx.TotalIn))
+
+	fmt.Println("outputs")
+	for _, vout := range decodedTx.Vout {
+		fmt.Printf("%s:\t%.8f\n", vout.ScriptPubKey.Address, vout.Value)
+	}
+	fmt.Printf("fee:\t\t\t\t\t\t%.8f\n", fee)
+	fmt.Printf("output amount:\t\t\t\t\t%.8f\n", decodedTx.TotalOut)
 	return nil
 }
 
